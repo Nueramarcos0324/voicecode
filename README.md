@@ -95,6 +95,7 @@ Any compositor works; the contract is two commands:
 ```bash
 voicecode chat                                   # hands-free conversation, Ctrl+C to stop
 voicecode chat --max-turns 3                     # three exchanges
+voicecode chat --model provider/model            # use a specific model for this chat
 voicecode chat --no-speak                        # typed answers, spoken questions
 voicecode say "hello from the speakers"          # TTS only
 voicecode ask "what does this repo do?"          # text in, speech out
@@ -131,9 +132,29 @@ listening.
 
 The loop is half-duplex: it does not listen while the answer is playing, so a
 normal speaker setup will not feed the assistant its own voice. Headphones are
-still nicer. A cloud model with 20 s of latency makes a poor conversation —
-point `opencode.model` at a fast model (a local LM Studio model works well) or
-use push-to-talk for long coding questions.
+still nicer. Model latency dominates the feel of a conversation: a local LM
+Studio model on a free GPU answers these short replies in roughly 1.5–3.5 s,
+while a busy cloud model can take 20 s or more. Set `chat.model` to the fast
+model and keep `opencode.model` for push-to-talk; see the configuration below.
+Set `VOICECODE_TIMINGS=1` to print per-stage timings (STT, model, TTS) to
+stderr.
+
+Measured end-of-speech to first audio on an i5-9600K / RTX 3090, with
+`faster-whisper small.en` int8, a local Qwen3.8-27B in LM Studio, and Piper
+`en_US-lessac-medium`:
+
+| stage | first turn | later turns |
+|---|---:|---:|
+| VAD endpoint wait | 0.7 s | 0.6 s |
+| speech to text | 1.2 s | 1.0 s |
+| model answer | 2.9 s | 1.5 s |
+| Piper synthesis | 2.0 s | 1.6 s |
+| **end of speech → first audio** | **6.9 s** | **4.8 s** |
+
+The first turn includes OpenCode session creation and STT model loading (the
+model is preloaded in the background while the microphone opens). Piper
+synthesis is the largest fixed cost; a smaller voice model is faster but less
+natural.
 
 ## Configuration
 
@@ -163,7 +184,8 @@ use push-to-talk for long coding questions.
     "model": "",
     "agent": "",
     "auto_approve": false,
-    "timeout": 300
+    "timeout": 300,
+    "prompt_prefix": "You are in a live voice conversation. Answer in at most two short sentences of plain spoken text. No markdown, lists, or code, and do not use tools."
   },
   "audio": {
     "input_device": "",
@@ -173,6 +195,7 @@ use push-to-talk for long coding questions.
     "silence_threshold": 0.008
   },
   "chat": {
+    "model": "",
     "silence_ms": 800,
     "min_speech_ms": 300,
     "listen_timeout": 30,
@@ -186,6 +209,13 @@ use push-to-talk for long coding questions.
 
 `chat.warmup_ms` is the one-shot recorder guard. `voicecode chat` uses a longer
 first-turn settle of 1.3 s and reuses the same stream afterwards.
+
+`opencode.prompt_prefix` is prepended to every question so spoken answers stay
+short and plain. Set it to `""` if you want OpenCode's normal, longer answers.
+`chat.model` overrides `opencode.model` for conversation mode only; point it at
+a fast local model (for example an LM Studio model) while keeping a stronger
+model for push-to-talk. `voicecode chat --model <provider/model>` overrides both
+for one session.
 
 ### STT engines
 
@@ -245,8 +275,16 @@ on stdout. If its model is missing, run `voxtype setup`.
 **OpenCode permission prompt** — run `voicecode ask ...` in a terminal once to
 approve, or set `auto_approve`.
 
-**Slow answers** — that is the model, not the audio path. Point
-`opencode.model` at a faster provider/model; startup is only ~0.3 s.
+**Local model unavailable** — OpenCode caches the LM Studio model list at
+startup. Start LM Studio (`lms server start`) and load the model, then run
+`opencode reload`; `voicecode` will otherwise report the provider error
+("Model unavailable: ...") when the answer comes back empty.
+
+**Slow answers** — that is the model, not the audio path. Point `chat.model`
+(or `opencode.model`) at a faster provider/model; startup is only ~0.3 s.
+`VOICECODE_TIMINGS=1 voicecode chat` prints STT, model, and TTS durations so
+you can see which stage is slow. Piper synthesis itself costs ~2 s per short
+reply on a CPU; a smaller voice model is faster but less natural.
 
 **Piper sounds robotic** — try `en_US-amy-medium` or `en_GB-alba-medium`; keep
 the `.onnx` and `.onnx.json` pair together.

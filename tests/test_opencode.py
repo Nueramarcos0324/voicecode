@@ -1,6 +1,7 @@
 import json
 
-from voicecode.opencode import parse_events
+from voicecode.config import DEFAULTS
+from voicecode.opencode import build_prompt, parse_error, parse_events
 
 
 def _text_event(message_id, part_id, text, session="ses_abc"):
@@ -67,3 +68,32 @@ def test_parse_ignores_noise_and_bad_json():
 
 def test_parse_empty():
     assert parse_events("") == ("", None)
+
+
+def test_build_prompt_applies_voice_prefix():
+    prompt = build_prompt("what is 17 times 3?", DEFAULTS)
+    assert prompt.startswith(DEFAULTS["opencode"]["prompt_prefix"])
+    assert prompt.endswith("what is 17 times 3?")
+
+
+def test_build_prompt_can_be_disabled():
+    cfg = {"opencode": {"prompt_prefix": ""}}
+    assert build_prompt("tell me more", cfg) == "tell me more"
+
+
+def test_parse_error_event():
+    out = json.dumps(
+        {
+            "type": "error",
+            "error": {
+                "type": "provider.no-route",
+                "message": "Model unavailable: lmstudio/qwen/qwen3.8-27b",
+            },
+        }
+    )
+    assert parse_error(out) == "Model unavailable: lmstudio/qwen/qwen3.8-27b"
+
+
+def test_parse_error_ignores_normal_events():
+    out = "\n".join([_text_event("msg_1", "prt_1", "hello"), "{broken"])
+    assert parse_error(out) is None

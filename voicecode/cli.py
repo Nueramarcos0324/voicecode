@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from pathlib import Path
@@ -30,7 +32,7 @@ from .audio import (
 from .config import load_config, load_session, save_session, state_dir, write_default_config, config_path
 from .doctor import check as doctor_check
 from .opencode import OpencodeError, ask as ask_opencode
-from .stt import STTError, transcribe
+from .stt import STTError, preload as preload_stt, transcribe
 from .text import for_speech
 from .tts import TTSError, speak
 from .vad import read_utterance
@@ -38,6 +40,12 @@ from .vad import read_utterance
 
 def _err(message: str) -> None:
     print(f"voicecode: {message}", file=sys.stderr)
+
+
+def _timing(label: str, seconds: float) -> None:
+    """Print a stage duration on stderr when VOICECODE_TIMINGS=1."""
+    if os.environ.get("VOICECODE_TIMINGS") == "1":
+        _err(f"timing {label}: {seconds * 1000:.0f} ms")
 
 
 def _speak_reply(reply: str, cfg: dict[str, Any], dry_run: bool) -> None:
@@ -75,7 +83,9 @@ def _ask(text: str, cfg: dict[str, Any], no_speak: bool) -> str:
         raise OpencodeError("empty prompt")
     _err("thinking…")
     session = load_session()
+    started = time.monotonic()
     reply = ask_opencode(text, cfg, session)
+    _timing("model", time.monotonic() - started)
     if cfg["session"].get("keep_context", True):
         save_session(reply.session_id)
     else:
@@ -200,11 +210,16 @@ def cmd_chat(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
         max_turns = int(cfg["chat"].get("max_turns", 0) or 0)
     chat = cfg["chat"]
     audio = cfg["audio"]
+    model_override = getattr(args, "model", None) or chat.get("model")
+    if model_override:
+        cfg["opencode"]["model"] = str(model_override)
     wait_seconds = args.timeout if args.timeout is not None else float(chat.get("listen_timeout", 30))
     turns = 0
+    _err("conversation mode — speak when prompted; Ctrl+C to stop")
+    # Warm the local STT model while the microphone opens for the first turn.
+    threading.Thread(target=preload_stt, args=(cfg,), daemon=True).start()
     proc = open_recorder(cfg)
     first = True
-    _err("conversation mode — speak when prompted; Ctrl+C to stop")
 
     try:
         while not max_turns or turns < max_turns:
@@ -245,7 +260,9 @@ def cmd_chat(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
             path = write_pcm(pcm)
 
             try:
+                started = time.monotonic()
                 text = _transcribe_file(path, cfg)
+                _timing("stt", time.monotonic() - started)
             except STTError as exc:
                 _err(str(exc))
                 continue
@@ -369,6 +386,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("chat", help="hands-free conversation: listen, answer, repeat")
     p.add_argument("--max-turns", type=int, default=None, help="stop after N exchanges (0 = unlimited)")
     p.add_argument("--timeout", type=float, default=None, help="seconds to wait for speech each turn")
+    p.add_argument("--model", help="provider/model for the conversation")
     p.add_argument("--no-speak", action="store_true", help="text-only conversation")
     p.set_defaults(func=cmd_chat)
 

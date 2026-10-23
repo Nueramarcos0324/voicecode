@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from .text import strip_ansi
 
 _MODEL = None
 _MODEL_KEY: tuple[str, str, str] | None = None
+_LOCK = threading.Lock()
 _LOG_LINE = re.compile(r"^\s*\[?\d{4}-\d\d-\d\dT")
 
 
@@ -67,20 +69,35 @@ def _load(cfg: dict[str, Any]):
     global _MODEL, _MODEL_KEY
     stt = cfg["stt"]
     key = (str(stt["model"]), str(stt["device"]), str(stt["compute_type"]))
-    if _MODEL is not None and _MODEL_KEY == key:
+    with _LOCK:
+        if _MODEL is not None and _MODEL_KEY == key:
+            return _MODEL
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as exc:  # pragma: no cover - depends on install
+            raise STTError(
+                "faster-whisper is not installed; install voxtype or run: pip install faster-whisper"
+            ) from exc
+        try:
+            _MODEL = WhisperModel(key[0], device=key[1], compute_type=key[2])
+        except Exception as exc:  # noqa: BLE001 - ctranslate2 raises many types
+            raise STTError(f"cannot load whisper model {key[0]!r}: {exc}") from exc
+        _MODEL_KEY = key
         return _MODEL
+
+
+def preload(cfg: dict[str, Any]) -> None:
+    """Load the local STT model ahead of the first utterance (best effort)."""
+    engine = str(cfg["stt"].get("engine") or "auto").lower()
+    if engine not in ("auto", "faster-whisper"):
+        return
     try:
-        from faster_whisper import WhisperModel
-    except ImportError as exc:  # pragma: no cover - depends on install
-        raise STTError(
-            "faster-whisper is not installed; install voxtype or run: pip install faster-whisper"
-        ) from exc
-    try:
-        _MODEL = WhisperModel(key[0], device=key[1], compute_type=key[2])
-    except Exception as exc:  # noqa: BLE001 - ctranslate2 raises many types
-        raise STTError(f"cannot load whisper model {key[0]!r}: {exc}") from exc
-    _MODEL_KEY = key
-    return _MODEL
+        import importlib.util
+
+        if importlib.util.find_spec("faster_whisper"):
+            _load(cfg)
+    except Exception:  # noqa: BLE001 - a failed preload must not stop chat
+        pass
 
 
 def _faster_whisper(path: Path, cfg: dict[str, Any]) -> str:

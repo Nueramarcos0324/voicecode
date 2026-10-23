@@ -6,7 +6,9 @@ import json
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +19,11 @@ from .audio import AudioError, play
 
 class TTSError(RuntimeError):
     pass
+
+
+def _timing(label: str, seconds: float) -> None:
+    if os.environ.get("VOICECODE_TIMINGS") == "1":
+        print(f"voicecode: timing {label}: {seconds * 1000:.0f} ms", file=sys.stderr)
 
 
 def _http_speak(text: str, cfg: dict[str, Any]) -> Path:
@@ -87,7 +94,9 @@ def synthesize(text: str, cfg: dict[str, Any]) -> Path | None:
 
 
 def speak(text: str, cfg: dict[str, Any], dry_run: bool = False, keep: bool = False) -> Path | None:
+    started = time.monotonic()
     path = synthesize(text, cfg)
+    _timing("tts_synth", time.monotonic() - started)
     if path is None:
         return None
     try:

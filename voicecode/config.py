@@ -35,6 +35,13 @@ DEFAULTS: dict[str, Any] = {
         "agent": "",
         "auto_approve": False,
         "timeout": 300,
+        # Prepended to every question. Answers are spoken, so the default asks
+        # for short plain text and no tool calls. Set to "" to disable.
+        "prompt_prefix": (
+            "You are in a live voice conversation. Answer in at most two short "
+            "sentences of plain spoken text. No markdown, lists, or code, and do "
+            "not use tools."
+        ),
     },
     "audio": {
         "input_device": "",
@@ -48,6 +55,7 @@ DEFAULTS: dict[str, Any] = {
         "keep_context": True,
     },
     "chat": {
+        "model": "",
         "silence_ms": 800,
         "min_speech_ms": 300,
         "listen_timeout": 30,

@@ -79,8 +79,39 @@ def parse_events(stdout: str) -> tuple[str, str | None]:
     return text.strip(), session_id
 
 
+def build_prompt(prompt: str, cfg: dict[str, Any]) -> str:
+    """Apply the configured voice-style prefix to a question."""
+    prefix = str(cfg["opencode"].get("prompt_prefix") or "").strip()
+    if not prefix:
+        return prompt
+    return f"{prefix}\n\n{prompt}"
+
+
+def parse_error(stdout: str) -> str | None:
+    """Return the message from the first error event in JSONL output."""
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "error":
+            continue
+        error = event.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("type")
+            if message:
+                return str(message)
+        elif error:
+            return str(error)
+    return None
+
+
 def ask(prompt: str, cfg: dict[str, Any], session_id: str | None = None) -> Reply:
     oc = cfg["opencode"]
+    prompt = build_prompt(prompt, cfg)
     binary = shlex.split(str(oc.get("binary") or "opencode"))
     cmd = [*binary, "run", "--format", "json"]
     if session_id:
@@ -116,6 +147,9 @@ def ask(prompt: str, cfg: dict[str, Any], session_id: str | None = None) -> Repl
         raise OpencodeError("OpenCode failed: " + (" | ".join(tail) or f"exit {proc.returncode}"))
     text, sid = parse_events(stdout)
     if not text:
+        message = parse_error(stdout)
+        if message:
+            raise OpencodeError(f"OpenCode error: {message}")
         tail = (stderr or "").strip().splitlines()[-8:]
         raise OpencodeError("OpenCode returned no text" + (": " + " | ".join(tail) if tail else ""))
     return Reply(text=text, session_id=sid or session_id, events=[])
