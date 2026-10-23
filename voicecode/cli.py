@@ -6,6 +6,7 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -13,13 +14,18 @@ from typing import Any
 from . import __version__
 from .audio import (
     AudioError,
+    RECORD_RATE,
     audio_levels,
+    drain_stream,
     is_recording,
     list_sources,
+    open_recorder,
     start_recording,
+    stop_recorder,
     stop_recording,
     trim_silence,
     wav_duration,
+    write_pcm,
 )
 from .config import load_config, load_session, save_session, state_dir, write_default_config, config_path
 from .doctor import check as doctor_check
@@ -27,6 +33,7 @@ from .opencode import OpencodeError, ask as ask_opencode
 from .stt import STTError, transcribe
 from .text import for_speech
 from .tts import TTSError, speak
+from .vad import read_utterance
 
 
 def _err(message: str) -> None:
@@ -167,6 +174,106 @@ def cmd_transcribe(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     return 0
 
 
+_EXIT_PHRASES = {
+    "stop",
+    "stop listening",
+    "exit",
+    "quit",
+    "goodbye",
+    "bye",
+    "that's all",
+    "thats all",
+    "end conversation",
+    "we're done",
+    "were done",
+}
+
+
+def _is_exit_phrase(text: str) -> bool:
+    normalized = " ".join(text.lower().replace("’", "'").split()).strip(" .,!?")
+    return normalized in _EXIT_PHRASES
+
+
+def cmd_chat(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
+    max_turns = args.max_turns
+    if max_turns is None:
+        max_turns = int(cfg["chat"].get("max_turns", 0) or 0)
+    chat = cfg["chat"]
+    audio = cfg["audio"]
+    wait_seconds = args.timeout if args.timeout is not None else float(chat.get("listen_timeout", 30))
+    turns = 0
+    proc = open_recorder(cfg)
+    first = True
+    _err("conversation mode — speak when prompted; Ctrl+C to stop")
+
+    try:
+        while not max_turns or turns < max_turns:
+            try:
+                if first:
+                    _err("starting microphone…")
+                else:
+                    _err("listening…")
+                    # Flush the assistant's own playback and any backlog before
+                    # asking for the next turn.
+                    drain_stream(proc.stdout, 0.8)
+                pcm = read_utterance(
+                    proc.stdout,
+                    sample_rate=RECORD_RATE,
+                    threshold=float(audio.get("silence_threshold", 0.008)),
+                    silence_ms=int(chat.get("silence_ms", 800)),
+                    min_speech_ms=int(chat.get("min_speech_ms", 300)),
+                    max_seconds=float(audio.get("max_seconds", 60)),
+                    wait_seconds=wait_seconds,
+                    warmup_ms=1300 if first else 150,
+                    on_phase=lambda phase: _err("recording…") if phase == "recording" else None,
+                )
+            except KeyboardInterrupt:
+                _err("stopped")
+                return 130
+
+            if pcm is None:
+                if proc.poll() is not None:
+                    try:
+                        error = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+                    except (OSError, ValueError):
+                        error = ""
+                    raise AudioError(f"recorder stopped: {error or 'unknown error'}")
+                _err("no speech detected; still listening (Ctrl+C to stop)")
+                first = False
+                continue
+            first = False
+            path = write_pcm(pcm)
+
+            try:
+                text = _transcribe_file(path, cfg)
+            except STTError as exc:
+                _err(str(exc))
+                continue
+            if not text:
+                continue
+            _err(f"you: {text}")
+
+            if _is_exit_phrase(text):
+                farewell = "Okay. Conversation ended."
+                print(farewell, flush=True)
+                if not args.no_speak:
+                    _speak_reply(farewell, cfg, dry_run=False)
+                break
+
+            try:
+                _ask(text, cfg, no_speak=args.no_speak)
+            except OpencodeError as exc:
+                _err(str(exc))
+                if not args.no_speak:
+                    _speak_reply("I could not get an answer. Check the terminal.", cfg, dry_run=False)
+            turns += 1
+            time.sleep(0.3)
+    finally:
+        stop_recorder(proc)
+
+    return 0
+
+
 def cmd_say(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     text = " ".join(args.text).strip() or sys.stdin.read().strip()
     if not text:
@@ -258,6 +365,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-ask", action="store_true")
     p.add_argument("--no-speak", action="store_true")
     p.set_defaults(func=cmd_listen)
+
+    p = sub.add_parser("chat", help="hands-free conversation: listen, answer, repeat")
+    p.add_argument("--max-turns", type=int, default=None, help="stop after N exchanges (0 = unlimited)")
+    p.add_argument("--timeout", type=float, default=None, help="seconds to wait for speech each turn")
+    p.add_argument("--no-speak", action="store_true", help="text-only conversation")
+    p.set_defaults(func=cmd_chat)
 
     p = sub.add_parser("ask", help="send text to OpenCode and speak the answer")
     p.add_argument("text", nargs="*")

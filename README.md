@@ -1,8 +1,9 @@
 # voicecode
 
-Push-to-talk, speech-to-speech for [OpenCode](https://opencode.ai) V2.
-Hold a key, talk, release: your speech is transcribed locally, sent to the
-OpenCode session you already use, and the answer is spoken back.
+Push-to-talk and hands-free speech-to-speech for [OpenCode](https://opencode.ai) V2.
+Hold a key and talk, or run a conversation loop in a terminal: your speech is
+transcribed locally, sent to the OpenCode session you already use, and the
+answer is spoken back.
 
 No cloud STT, no cloud TTS, no API keys of its own. It shells out to
 `opencode run`, so it inherits your providers, model, agent, permissions, and
@@ -11,6 +12,8 @@ session history.
 ```
 hold SUPER+F9 ──► pw-record ──► whisper (local) ──► opencode run ──► piper ──► speakers
       release ─────────────────────────────────────────┘
+
+voicecode chat ──► VAD loop ──► same pipeline ──► speaks, listens again
 ```
 
 ## Why this exists
@@ -90,6 +93,9 @@ Any compositor works; the contract is two commands:
 ## Use
 
 ```bash
+voicecode chat                                   # hands-free conversation, Ctrl+C to stop
+voicecode chat --max-turns 3                     # three exchanges
+voicecode chat --no-speak                        # typed answers, spoken questions
 voicecode say "hello from the speakers"          # TTS only
 voicecode ask "what does this repo do?"          # text in, speech out
 voicecode listen --wav question.wav              # full loop from a file
@@ -105,6 +111,29 @@ voicecode doctor
 trims silence, transcribes, calls OpenCode, prints the answer, shows a
 notification, and speaks it. The transcript and status lines go to stderr; the
 answer goes to stdout.
+
+## Conversation mode
+
+`voicecode chat` keeps one microphone stream open and turns it into a
+back-and-forth conversation:
+
+1. it waits for speech (VAD, 800 ms of silence ends your turn),
+2. transcribes it, sends it to the persistent OpenCode session,
+3. speaks the answer, then listens again.
+
+Say **stop**, **exit**, **quit**, **goodbye**, or **that's all** to end it, or
+press `Ctrl+C`. `--max-turns N` bounds the loop.
+
+The first turn spends 1.3 s settling the microphone: some inputs emit a
+decaying pop when the stream opens, and the VAD would otherwise mistake it for
+speech. Later turns reuse the open stream and only flush buffered audio before
+listening.
+
+The loop is half-duplex: it does not listen while the answer is playing, so a
+normal speaker setup will not feed the assistant its own voice. Headphones are
+still nicer. A cloud model with 20 s of latency makes a poor conversation —
+point `opencode.model` at a fast model (a local LM Studio model works well) or
+use push-to-talk for long coding questions.
 
 ## Configuration
 
@@ -143,10 +172,20 @@ answer goes to stdout.
     "min_seconds": 0.4,
     "silence_threshold": 0.008
   },
+  "chat": {
+    "silence_ms": 800,
+    "min_speech_ms": 300,
+    "listen_timeout": 30,
+    "max_turns": 0,
+    "warmup_ms": 400
+  },
   "session": { "keep_context": true },
   "ui": { "notify": true }
 }
 ```
+
+`chat.warmup_ms` is the one-shot recorder guard. `voicecode chat` uses a longer
+first-turn settle of 1.3 s and reuses the same stream afterwards.
 
 ### STT engines
 
@@ -190,6 +229,15 @@ tools without a confirmation. The voice session is a normal OpenCode session;
 (not a `.monitor`) is selected. Check `pactl get-source-mute <name>` and that a
 mic is actually plugged in: `amixer -c 0 contents | grep -i jack` should not say
 all mic jacks are `off`.
+
+**`voicecode chat` starts recording by itself** — the input is producing a
+device pop or hum. Raise `chat.warmup_ms` (chat also discards 1.3 s on the first
+turn). If it keeps happening, switch `audio.input_device` or plug in a different
+microphone.
+
+**`voicecode chat` hears its own answer** — keep the loop half-duplex (the
+default) and do not point `audio.input_device` at a `.monitor` source. Use
+headphones if the speakers are very loud.
 
 **No text from voxtype** — `voxtype transcribe file.wav` must print a transcript
 on stdout. If its model is missing, run `voxtype setup`.

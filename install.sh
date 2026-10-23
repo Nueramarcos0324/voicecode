@@ -55,6 +55,8 @@ cfg = {
                "auto_approve": False, "timeout": 300},
   "audio": {"input_device": "", "output_command": "", "max_seconds": 60,
             "min_seconds": 0.4, "silence_threshold": 0.008},
+  "chat": {"silence_ms": 800, "min_speech_ms": 300, "listen_timeout": 30,
+           "max_turns": 0, "warmup_ms": 400},
   "session": {"keep_context": True},
   "ui": {"notify": True},
 }

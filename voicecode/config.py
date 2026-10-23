@@ -47,6 +47,13 @@ DEFAULTS: dict[str, Any] = {
     "session": {
         "keep_context": True,
     },
+    "chat": {
+        "silence_ms": 800,
+        "min_speech_ms": 300,
+        "listen_timeout": 30,
+        "max_turns": 0,
+        "warmup_ms": 400,
+    },
     "ui": {
         "notify": True,
     },

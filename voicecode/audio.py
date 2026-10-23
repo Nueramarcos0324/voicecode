@@ -10,9 +10,10 @@ import subprocess
 import time
 import wave
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .config import recording_path, recording_state_path
+from .vad import read_utterance
 
 RECORD_RATE = 16000
 
@@ -64,6 +65,17 @@ def _pick_source(cfg: dict[str, Any]) -> str | None:
     return None
 
 
+def _require_source(cfg: dict[str, Any]) -> str | None:
+    source = _pick_source(cfg)
+    if source is None:
+        sources = list_sources()
+        if sources and all(monitor for _index, _name, monitor in sources):
+            raise AudioError(
+                "no microphone found (only .monitor sources); plug one in or set audio.input_device"
+            )
+    return source
+
+
 def list_sources() -> list[tuple[int, str, bool]]:
     """List PipeWire/Pulse sources as (index, name, is_monitor)."""
     import shutil
@@ -102,7 +114,7 @@ def start_recording(cfg: dict[str, Any]) -> Path:
 
     from shutil import which
 
-    source = _pick_source(cfg)
+    source = _require_source(cfg)
     max_seconds = int(audio.get("max_seconds", 60))
     if which("pw-record"):
         cmd = [
@@ -288,3 +300,138 @@ def play(path: Path, cfg: dict[str, Any]) -> None:
     proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         raise AudioError(proc.stderr.decode("utf-8", "replace").strip() or "playback failed")
+
+
+def _raw_recorder(cfg: dict[str, Any]) -> list[str]:
+    """Command that streams raw s16le mono PCM at RECORD_RATE on stdout."""
+    from shutil import which
+
+    source = _require_source(cfg)
+    if which("pw-record"):
+        cmd = [
+            "pw-record",
+            "--container",
+            "raw",
+            "--rate",
+            str(RECORD_RATE),
+            "--channels",
+            "1",
+            "--format",
+            "s16",
+        ]
+        if source:
+            cmd += ["--target", source]
+        cmd.append("-")
+        return cmd
+    if which("parec"):
+        cmd = ["parec", "--format=s16le", f"--rate={RECORD_RATE}", "--channels=1", "--raw"]
+        if source:
+            cmd.append(f"--device={source}")
+        return cmd
+    if which("arecord"):
+        cmd = ["arecord", "-q", "-f", "S16_LE", "-r", str(RECORD_RATE), "-c", "1", "-t", "raw"]
+        device = str(cfg["audio"].get("input_device") or "").strip()
+        if device:
+            cmd += ["-D", device]
+        return cmd
+    raise AudioError("no recorder found (install pipewire, pulseaudio-utils, or alsa-utils)")
+
+
+def _stop_process(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=2)
+
+
+def open_recorder(cfg: dict[str, Any]) -> subprocess.Popen:
+    """Start a raw PCM recorder that stays open across conversation turns."""
+    return subprocess.Popen(
+        _raw_recorder(cfg),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+    )
+
+
+def write_pcm(pcm: bytes, path: Path | None = None) -> Path:
+    out = path or recording_path()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(out), "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(RECORD_RATE)
+        wf.writeframes(pcm)
+    return out
+
+
+def drain_stream(stream: Any, seconds: float = 0.8) -> None:
+    """Throw away buffered audio (assistant echo, backlog) before listening."""
+    import select
+
+    fd = stream.fileno()
+    end = time.monotonic() + seconds
+    while True:
+        remaining = end - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            ready, _, _ = select.select([fd], [], [], remaining)
+        except (OSError, ValueError):
+            break
+        if not ready:
+            break
+        try:
+            chunk = stream.read1(65536)
+        except (BlockingIOError, OSError):
+            break
+        if not chunk:
+            break
+
+
+def stop_recorder(proc: subprocess.Popen) -> None:
+    _stop_process(proc)
+
+
+def record_utterance(
+    cfg: dict[str, Any],
+    wait_seconds: float | None = None,
+    on_phase: Callable[[str], None] | None = None,
+) -> Path | None:
+    """Record one hands-free turn: wait for speech, stop after silence.
+
+    Returns a WAV path, or None if nobody spoke within the wait window.
+    """
+    chat = cfg.get("chat", {})
+    audio = cfg["audio"]
+    proc = open_recorder(cfg)
+    pcm: bytes | None = None
+    error = ""
+    try:
+        pcm = read_utterance(
+            proc.stdout,
+            sample_rate=RECORD_RATE,
+            threshold=float(audio.get("silence_threshold", 0.008)),
+            silence_ms=int(chat.get("silence_ms", 800)),
+            min_speech_ms=int(chat.get("min_speech_ms", 300)),
+            max_seconds=float(audio.get("max_seconds", 60)),
+            wait_seconds=float(wait_seconds if wait_seconds is not None else chat.get("listen_timeout", 30)),
+            warmup_ms=int(chat.get("warmup_ms", 400)),
+            on_phase=on_phase,
+        )
+    finally:
+        _stop_process(proc)
+        try:
+            error = (proc.stderr.read() or b"").decode("utf-8", "replace").strip()
+        except (OSError, ValueError):
+            pass
+
+    if not pcm:
+        if proc.returncode not in (0, -15, -2) and error:
+            raise AudioError(f"recorder failed: {error}")
+        return None
+    return write_pcm(pcm)
