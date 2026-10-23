@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "voicecode"
+version = "0.1.0"
+description = "Push-to-talk speech-to-speech for OpenCode V2, fully local."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Marcos Isaac Rodriguez" }]
+dependencies = [
+  "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+whisper = ["faster-whisper>=1.0", "av>=14,<19"]
+piper = ["piper-tts>=1.2"]
+dev = ["pytest>=8"]
+all = ["faster-whisper>=1.0", "av>=14,<19", "piper-tts>=1.2", "pytest>=8"]
+
+[project.scripts]
+voicecode = "voicecode.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["voicecode*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

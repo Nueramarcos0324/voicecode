@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+*.wav
+!tests/fixtures/*.wav
+voices/
+*.onnx
+*.onnx.json
