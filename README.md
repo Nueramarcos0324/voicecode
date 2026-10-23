@@ -46,7 +46,7 @@ cloud provider, and the TUI has no client for it.
 ## Install
 
 ```bash
-git clone https://github.com/<you>/voicecode ~/voicecode
+git clone https://github.com/Nueramarcos/voicecode ~/voicecode
 cd ~/voicecode
 ./install.sh
 ```
